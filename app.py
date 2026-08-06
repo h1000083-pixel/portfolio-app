@@ -1,21 +1,51 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import json
 
-# ページ設定
+# ==========================================
+# 1. データ保存・読み込みの機能 (ローカルストレージ風)
+# ==========================================
+# ※Streamlit Community Cloudではファイルに保存しても再起動で消えるため、
+# ユーザーのブラウザ側にデータを保持するか、今回は簡易的にファイル保存(仮)を実装しますが、
+# 本当の永続化にはGoogle Sheetsやデータベースが必要です。
+# ここでは、一時的なセッション切れ対策としてJSONファイルへの書き出し/読み込みを行います。
+DATA_FILE = "portfolio_data.json"
+
+def load_data():
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if data:
+                return pd.DataFrame(data)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return pd.DataFrame(columns=["銘柄コード", "購入単価", "数量"])
+
+def save_data(df):
+    try:
+        df.to_json(DATA_FILE, orient="records", force_ascii=False)
+    except Exception as e:
+        st.error(f"データの保存に失敗しました: {e}")
+
+# ==========================================
+# 2. アプリの初期設定
+# ==========================================
 st.set_page_config(page_title="ポートフォリオ管理", layout="wide")
-st.title("📈 ポートフォリオ管理アプリ")
+st.title("📈 ポートフォリオ＆配当管理アプリ")
 
-# セッションステート（メモリ）にデータフレームを初期化
+# セッションステートの初期化（起動時にファイルから読み込む）
 if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = pd.DataFrame(columns=["銘柄コード", "購入単価", "数量"])
+    st.session_state.portfolio = load_data()
 
 st.markdown("""
 ### 銘柄の登録
 日本株の場合は4桁の数字（例: `7203`）を入力するだけで自動的に登録可能です。
 """)
 
-# 1. 銘柄の登録フォーム
+# ==========================================
+# 3. 銘柄の登録フォーム
+# ==========================================
 with st.form("add_stock"):
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -23,31 +53,33 @@ with st.form("add_stock"):
     with col2:
         buy_price = st.number_input("購入単価（円）", min_value=0.0, format="%.2f", step=10.0)
     with col3:
-        # デフォルト数量を100に設定し、100株単位で調整できるように変更
         quantity = st.number_input("数量（株）", min_value=1, value=100, step=100)
     
     submit = st.form_submit_button("登録")
     if submit and ticker:
-        # 数字のみ（例: 7203）が入力された場合、自動的に .T を付与する
         if ticker.isdigit():
             ticker += ".T"
             
         new_data = pd.DataFrame([{"銘柄コード": ticker, "購入単価": buy_price, "数量": quantity}])
         st.session_state.portfolio = pd.concat([st.session_state.portfolio, new_data], ignore_index=True)
-        st.success(f"{ticker} を登録しました！")
+        # 登録するたびにファイルへ保存
+        save_data(st.session_state.portfolio)
+        st.success(f"{ticker} を登録・保存しました！")
 
 st.divider()
 
-# 2. ポートフォリオの評価と計算
+# ==========================================
+# 4. ポートフォリオの評価と計算
+# ==========================================
 if not st.session_state.portfolio.empty:
     st.subheader("現在のポートフォリオ状況")
     
     results = []
     total_investment = 0
     total_current_value = 0
+    total_annual_dividend = 0 # 合計年間配当金
     
-    # プログレスバー
-    progress_text = "最新の株価データを取得中..."
+    progress_text = "最新の株価・配当データを取得中..."
     my_bar = st.progress(0, text=progress_text)
     
     total_stocks = len(st.session_state.portfolio)
@@ -58,12 +90,28 @@ if not st.session_state.portfolio.empty:
         qty = row["数量"]
         
         try:
-            # Yahoo Financeから最新データを取得
             stock = yf.Ticker(t)
             hist = stock.history(period="1d")
             
             if not hist.empty:
                 current_p = hist['Close'].iloc[-1]
+                
+                # --- 配当データの取得と計算 ---
+                info = stock.info
+                # 1株あたりの年間配当金（取得できない場合は0）
+                dividend_per_share = info.get('dividendRate', 0)
+                if dividend_per_share is None:
+                    dividend_per_share = 0
+                
+                # この銘柄の年間配当金総額
+                annual_dividend = dividend_per_share * qty
+                total_annual_dividend += annual_dividend
+                
+                # 購入金額に対する配当利回り (Yield on Cost)
+                # (1株あたりの配当金 / 購入単価) * 100
+                yield_on_cost = (dividend_per_share / buy_p) * 100 if buy_p > 0 else 0
+                
+                # ------------------------------
                 
                 investment_val = buy_p * qty
                 current_val = current_p * qty
@@ -79,25 +127,28 @@ if not st.session_state.portfolio.empty:
                     "購入単価": buy_p,
                     "現在株価": current_p,
                     "株価変化": price_change,
+                    "1株配当金": dividend_per_share,
+                    "年間配当金": annual_dividend,
+                    "購入利回り": f"{yield_on_cost:.2f}%", # 追加：購入利回り(YoC)
                     "投資額": investment_val,
                     "評価額": current_val,
                     "損益額": profit_loss
                 })
             else:
-                st.warning(f"{t} のデータが取得できませんでした。コードが間違っている可能性があります。")
+                st.warning(f"{t} のデータが取得できませんでした。")
         except Exception as e:
              st.warning(f"{t} のデータ取得中にエラーが発生しました。")
              
-        # プログレスバーの更新
         my_bar.progress((index + 1) / total_stocks, text=progress_text)
         
-    my_bar.empty() # データ取得完了後にプログレスバーを消す
+    my_bar.empty()
 
     if results:
-        # 3. 銘柄ごとの詳細をテーブル表示
+        # ==========================================
+        # 5. テーブルの表示と色付け
+        # ==========================================
         df_results = pd.DataFrame(results)
         
-        # プラスなら青、マイナスなら赤にする関数の定義
         def color_profit_loss(val):
             if isinstance(val, (int, float)):
                 if val > 0:
@@ -106,7 +157,7 @@ if not st.session_state.portfolio.empty:
                     return 'color: red;'
             return 'color: black;'
 
-        # テーブルの書式と色を適用
+        # 色を適用するカラムを指定
         if hasattr(df_results.style, 'map'):
             styled_df = df_results.style.map(color_profit_loss, subset=['損益額', '株価変化'])
         else:
@@ -116,6 +167,8 @@ if not st.session_state.portfolio.empty:
             "購入単価": "{:,.2f}",
             "現在株価": "{:,.2f}",
             "株価変化": "{:,.2f}",
+            "1株配当金": "{:,.2f}",
+            "年間配当金": "{:,.0f}",
             "投資額": "{:,.0f}",
             "評価額": "{:,.0f}",
             "損益額": "{:,.0f}"
@@ -125,20 +178,26 @@ if not st.session_state.portfolio.empty:
         
         st.divider()
         
-        # 4. 全体のサマリーを表示
+        # ==========================================
+        # 6. 全体のサマリーを表示
+        # ==========================================
         st.subheader("ポートフォリオ合計")
         total_profit_loss = total_current_value - total_investment
         
-        col1, col2, col3 = st.columns(3)
+        # 4列にして配当金も表示
+        col1, col2, col3, col4 = st.columns(4)
         col1.metric("購入時点の合計金額", f"{total_investment:,.0f} 円")
         col2.metric("現在の合計評価額", f"{total_current_value:,.0f} 円")
         
-        # 合計の損益もプラスなら青、マイナスなら赤で表示
+        # 合計の購入利回り (合計年間配当金 / 合計投資額)
+        total_yield_on_cost = (total_annual_dividend / total_investment) * 100 if total_investment > 0 else 0
+        col3.metric("年間配当金予想 (合計)", f"{total_annual_dividend:,.0f} 円", f"利回り {total_yield_on_cost:.2f}%")
+        
         pl_color = "blue" if total_profit_loss > 0 else "red" if total_profit_loss < 0 else "black"
         pl_sign = "+" if total_profit_loss > 0 else ""
         pl_percent = (total_profit_loss / total_investment) * 100 if total_investment > 0 else 0
         
-        col3.markdown(f"""
+        col4.markdown(f"""
         <div style="font-size: 14px; color: #555;">合計損益額</div>
         <div style="font-size: 32px; font-weight: bold; color: {pl_color};">
             {pl_sign}{total_profit_loss:,.0f} 円 <span style="font-size: 18px;">({pl_sign}{pl_percent:.2f}%)</span>
@@ -148,6 +207,7 @@ if not st.session_state.portfolio.empty:
     # リセットボタン
     if st.button("全データをクリア"):
         st.session_state.portfolio = pd.DataFrame(columns=["銘柄コード", "購入単価", "数量"])
+        save_data(st.session_state.portfolio) # 空のデータを保存してクリア
         st.rerun()
 
 else:
