@@ -16,7 +16,7 @@ def load_data():
                 return pd.DataFrame(data)
     except (FileNotFoundError, json.JSONDecodeError):
         pass
-    return pd.DataFrame(columns=["銘柄コード", "購入単価", "数量"])
+    return pd.DataFrame(columns=["銘柄コード", "企業名", "購入単価", "数量"]) # 企業名カラムを追加
 
 def save_data(df):
     try:
@@ -33,6 +33,9 @@ st.title("📈 ポートフォリオ＆配当管理アプリ")
 # セッションステートの初期化
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = load_data()
+    # 古いデータに「企業名」カラムがない場合の互換性対応
+    if '企業名' not in st.session_state.portfolio.columns:
+        st.session_state.portfolio['企業名'] = ""
 
 st.markdown("""
 ### 銘柄の登録
@@ -55,11 +58,21 @@ with st.form("add_stock"):
     if submit and ticker:
         if ticker.isdigit():
             ticker += ".T"
+        
+        # 登録時に企業名を取得しておく
+        company_name = ticker
+        try:
+            stock_info = yf.Ticker(ticker).info
+            # 日本語名が取得できる場合は取得し、なければ英語名、それもなければティッカーのまま
+            company_name = stock_info.get('longName', stock_info.get('shortName', ticker))
+        except Exception:
+            pass # 取得失敗時はティッカーをそのまま使う
             
-        new_data = pd.DataFrame([{"銘柄コード": ticker, "購入単価": buy_price, "数量": quantity}])
+        new_data = pd.DataFrame([{"銘柄コード": ticker, "企業名": company_name, "購入単価": buy_price, "数量": quantity}])
         st.session_state.portfolio = pd.concat([st.session_state.portfolio, new_data], ignore_index=True)
         save_data(st.session_state.portfolio)
-        st.success(f"{ticker} を登録・保存しました！")
+        st.success(f"{company_name} ({ticker}) を登録・保存しました！")
+        st.rerun() # 登録後すぐに画面を更新して最新の状態を表示
 
 st.divider()
 
@@ -83,7 +96,11 @@ if not st.session_state.portfolio.empty:
         t = row["銘柄コード"]
         buy_p = row["購入単価"]
         qty = row["数量"]
-        
+        # 企業名が空の場合はティッカーを使用（古いデータ対応）
+        c_name = row.get("企業名", t) 
+        if pd.isna(c_name) or c_name == "":
+            c_name = t
+            
         try:
             stock = yf.Ticker(t)
             hist = stock.history(period="1d")
@@ -95,6 +112,10 @@ if not st.session_state.portfolio.empty:
                 dividend_per_share = info.get('dividendRate', 0)
                 if dividend_per_share is None:
                     dividend_per_share = 0
+                
+                # Yahoo Financeの仕様上、企業名がうまく取得できていなかった場合、ここでもう一度試みる
+                if c_name == t:
+                    c_name = info.get('longName', info.get('shortName', t))
                 
                 annual_dividend = dividend_per_share * qty
                 total_annual_dividend += annual_dividend
@@ -109,7 +130,7 @@ if not st.session_state.portfolio.empty:
                 total_current_value += current_val
                 
                 results.append({
-                    "銘柄": t,
+                    "企業名 (銘柄)": f"{c_name} ({t})",
                     "数量": qty,
                     "購入単価": buy_p,
                     "現在株価": current_p,
@@ -191,29 +212,45 @@ if not st.session_state.portfolio.empty:
     st.divider()
     
     # ==========================================
-    # 7. データの削除機能 (個別・全削除)
+    # 7. データの削除機能 (複数選択可能・日本語化)
     # ==========================================
     st.subheader("データの削除")
     
     del_col1, del_col2 = st.columns([2, 1])
     
     with del_col1:
-        # 削除用の選択肢を作成
-        options = [f"{i}: {row['銘柄コード']} (単価: {row['購入単価']}円)" for i, row in st.session_state.portfolio.iterrows()]
-        selected_to_delete = st.selectbox("削除する銘柄を選択してください", options)
+        # 削除用の選択肢を作成（インデックスを隠し、企業名と単価を表示）
+        options = []
+        for i, row in st.session_state.portfolio.iterrows():
+            c_name = row.get("企業名", row["銘柄コード"])
+            if pd.isna(c_name) or c_name == "":
+                c_name = row["銘柄コード"]
+            options.append(f"{i}: {c_name} (単価: {row['購入単価']}円)")
+            
+        # multiselect に変更し、プレースホルダーなどを日本語に
+        selected_to_delete = st.multiselect(
+            "削除する銘柄を選択してください（複数選択可）", 
+            options,
+            placeholder="ここをクリックして選択"
+        )
         
         if st.button("選択した銘柄を削除"):
-            # コロン(:)より前のインデックス番号を取得して削除
-            idx = int(selected_to_delete.split(":")[0])
-            st.session_state.portfolio = st.session_state.portfolio.drop(idx).reset_index(drop=True)
-            save_data(st.session_state.portfolio)
-            st.rerun()
+            if selected_to_delete:
+                # 選択されたすべてのアイテムからインデックス番号を抽出
+                indices_to_drop = [int(item.split(":")[0]) for item in selected_to_delete]
+                # 該当するインデックスを削除し、インデックスを振り直す
+                st.session_state.portfolio = st.session_state.portfolio.drop(indices_to_drop).reset_index(drop=True)
+                save_data(st.session_state.portfolio)
+                st.success("選択した銘柄を削除しました。")
+                st.rerun()
+            else:
+                st.warning("削除する銘柄が選択されていません。")
 
     with del_col2:
         st.write("") # 位置調整
         st.write("")
         if st.button("全データをクリア（リセット）"):
-            st.session_state.portfolio = pd.DataFrame(columns=["銘柄コード", "購入単価", "数量"])
+            st.session_state.portfolio = pd.DataFrame(columns=["銘柄コード", "企業名", "購入単価", "数量"])
             save_data(st.session_state.portfolio)
             st.rerun()
 
