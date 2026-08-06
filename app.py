@@ -6,10 +6,6 @@ import json
 # ==========================================
 # 1. データ保存・読み込みの機能 (ローカルストレージ風)
 # ==========================================
-# ※Streamlit Community Cloudではファイルに保存しても再起動で消えるため、
-# ユーザーのブラウザ側にデータを保持するか、今回は簡易的にファイル保存(仮)を実装しますが、
-# 本当の永続化にはGoogle Sheetsやデータベースが必要です。
-# ここでは、一時的なセッション切れ対策としてJSONファイルへの書き出し/読み込みを行います。
 DATA_FILE = "portfolio_data.json"
 
 def load_data():
@@ -34,7 +30,7 @@ def save_data(df):
 st.set_page_config(page_title="ポートフォリオ管理", layout="wide")
 st.title("📈 ポートフォリオ＆配当管理アプリ")
 
-# セッションステートの初期化（起動時にファイルから読み込む）
+# セッションステートの初期化
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = load_data()
 
@@ -62,7 +58,6 @@ with st.form("add_stock"):
             
         new_data = pd.DataFrame([{"銘柄コード": ticker, "購入単価": buy_price, "数量": quantity}])
         st.session_state.portfolio = pd.concat([st.session_state.portfolio, new_data], ignore_index=True)
-        # 登録するたびにファイルへ保存
         save_data(st.session_state.portfolio)
         st.success(f"{ticker} を登録・保存しました！")
 
@@ -77,7 +72,7 @@ if not st.session_state.portfolio.empty:
     results = []
     total_investment = 0
     total_current_value = 0
-    total_annual_dividend = 0 # 合計年間配当金
+    total_annual_dividend = 0
     
     progress_text = "最新の株価・配当データを取得中..."
     my_bar = st.progress(0, text=progress_text)
@@ -96,22 +91,14 @@ if not st.session_state.portfolio.empty:
             if not hist.empty:
                 current_p = hist['Close'].iloc[-1]
                 
-                # --- 配当データの取得と計算 ---
                 info = stock.info
-                # 1株あたりの年間配当金（取得できない場合は0）
                 dividend_per_share = info.get('dividendRate', 0)
                 if dividend_per_share is None:
                     dividend_per_share = 0
                 
-                # この銘柄の年間配当金総額
                 annual_dividend = dividend_per_share * qty
                 total_annual_dividend += annual_dividend
-                
-                # 購入金額に対する配当利回り (Yield on Cost)
-                # (1株あたりの配当金 / 購入単価) * 100
                 yield_on_cost = (dividend_per_share / buy_p) * 100 if buy_p > 0 else 0
-                
-                # ------------------------------
                 
                 investment_val = buy_p * qty
                 current_val = current_p * qty
@@ -129,7 +116,7 @@ if not st.session_state.portfolio.empty:
                     "株価変化": price_change,
                     "1株配当金": dividend_per_share,
                     "年間配当金": annual_dividend,
-                    "購入利回り": f"{yield_on_cost:.2f}%", # 追加：購入利回り(YoC)
+                    "購入利回り": f"{yield_on_cost:.2f}%",
                     "投資額": investment_val,
                     "評価額": current_val,
                     "損益額": profit_loss
@@ -157,7 +144,6 @@ if not st.session_state.portfolio.empty:
                     return 'color: red;'
             return 'color: black;'
 
-        # 色を適用するカラムを指定
         if hasattr(df_results.style, 'map'):
             styled_df = df_results.style.map(color_profit_loss, subset=['損益額', '株価変化'])
         else:
@@ -184,12 +170,10 @@ if not st.session_state.portfolio.empty:
         st.subheader("ポートフォリオ合計")
         total_profit_loss = total_current_value - total_investment
         
-        # 4列にして配当金も表示
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("購入時点の合計金額", f"{total_investment:,.0f} 円")
         col2.metric("現在の合計評価額", f"{total_current_value:,.0f} 円")
         
-        # 合計の購入利回り (合計年間配当金 / 合計投資額)
         total_yield_on_cost = (total_annual_dividend / total_investment) * 100 if total_investment > 0 else 0
         col3.metric("年間配当金予想 (合計)", f"{total_annual_dividend:,.0f} 円", f"利回り {total_yield_on_cost:.2f}%")
         
@@ -204,11 +188,34 @@ if not st.session_state.portfolio.empty:
         </div>
         """, unsafe_allow_html=True)
         
-    # リセットボタン
-    if st.button("全データをクリア"):
-        st.session_state.portfolio = pd.DataFrame(columns=["銘柄コード", "購入単価", "数量"])
-        save_data(st.session_state.portfolio) # 空のデータを保存してクリア
-        st.rerun()
+    st.divider()
+    
+    # ==========================================
+    # 7. データの削除機能 (個別・全削除)
+    # ==========================================
+    st.subheader("データの削除")
+    
+    del_col1, del_col2 = st.columns([2, 1])
+    
+    with del_col1:
+        # 削除用の選択肢を作成
+        options = [f"{i}: {row['銘柄コード']} (単価: {row['購入単価']}円)" for i, row in st.session_state.portfolio.iterrows()]
+        selected_to_delete = st.selectbox("削除する銘柄を選択してください", options)
+        
+        if st.button("選択した銘柄を削除"):
+            # コロン(:)より前のインデックス番号を取得して削除
+            idx = int(selected_to_delete.split(":")[0])
+            st.session_state.portfolio = st.session_state.portfolio.drop(idx).reset_index(drop=True)
+            save_data(st.session_state.portfolio)
+            st.rerun()
+
+    with del_col2:
+        st.write("") # 位置調整
+        st.write("")
+        if st.button("全データをクリア（リセット）"):
+            st.session_state.portfolio = pd.DataFrame(columns=["銘柄コード", "購入単価", "数量"])
+            save_data(st.session_state.portfolio)
+            st.rerun()
 
 else:
     st.info("銘柄を登録すると、ここにポートフォリオの状況が表示されます。")
